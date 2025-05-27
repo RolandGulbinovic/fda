@@ -8,6 +8,10 @@ library(tibble)
 library(readxl)
 library(refund)
 library(funFEM)
+library(fda.usc)
+library(car)
+library(far)
+
 df <- read_excel("galutinis_nenormalizuotas - Copy.xlsx")
 consumption_data <- df[, 2:(ncol(df) - 2)]
 n_clients <- ncol(consumption_data)
@@ -43,6 +47,7 @@ common_basis <- fd_list[[1]]$basis
 fd_smooth <- fd(coef_matrix, common_basis)
 
 
+
 ###########
 # PCA
 ###########
@@ -72,7 +77,7 @@ plot(fpca_result$harmonics[3],
 
 
 ##################
-######### Regression - Attempt 1
+######### Regression - FPCA
 ##################
 Y_mat <- eval.fd(time_grid, fd_smooth) %>% t()  # each row is a client
 
@@ -101,16 +106,16 @@ betalist <- list(
 )
 fos_model <- fRegress(fd_smooth, xfdlist, betalist)
 
-par(mfrow = c(1, 2))
+par(mfrow = c(1, 1))
 
 plot(fos_model$betaestlist[[1]], 
-     main = "Intercept β₀(t)",
+     main = "Intercept β_0(t)",
      xlab = "Normalized time", 
      ylab = "Energy consumption")
 
 # Total consumption effect β₁(t)
 plot(fos_model$betaestlist[[2]], 
-     main = "Total Consumption Effect β₁(t)",
+     main = "Total Consumption Effect β_1(t)",
      xlab = "Normalized time", 
      ylab = "Effect size")
 
@@ -141,12 +146,12 @@ fpca_model <- fRegress(fd_smooth, xfdlist, betalist)
 
 par(mfrow = c(2, 2))
 
-plot(fpca_model$betaestlist[[1]], main = "Intercept β₀(t)")
-plot(fpca_model$betaestlist[[2]], main = "FPCA1 Effect β₁(t)")
-plot(fpca_model$betaestlist[[3]], main = "FPCA2 Effect β₂(t)")
-plot(fpca_model$betaestlist[[4]], main = "FPCA3 Effect β₃(t)")
+plot(fpca_model$betaestlist[[1]], main = "Intercept β_0(t)")
+plot(fpca_model$betaestlist[[2]], main = "FPCA1 Effect β_1(t)")
+plot(fpca_model$betaestlist[[3]], main = "FPCA2 Effect β_2(t)")
+plot(fpca_model$betaestlist[[4]], main = "FPCA3 Effect β_3(t)")
 
-
+summary(fpca_model)
 par(mfrow = c(1, 1))
 
 
@@ -178,7 +183,10 @@ legend("topleft", legend = paste("Cluster", 1:2), col = 1:2, lty = 1, lwd = 2)
 
 table(res_v$cls)
 # most of the clients are in Low Cluster.
+total_consumption <- colSums(t(Y_mat))
 
+# Apply Levene's Test
+leveneTest(total_consumption ~ as.factor(res_v$cls))
 
 # Evaluate consumption curves
 consumption_mat <- eval.fd(time_grid, fd_smooth)
@@ -230,6 +238,16 @@ fANOVA.pointwise <- function(data, groups, t.seq, alpha = 0.05) {
   plot(t.seq, pvals, type = "l", lwd = 2, col = "darkred",
        main = "Pointwise ANOVA p-values", xlab = "Time", ylab = "p-value", ylim = c(0, 1))
   abline(h = alpha, col = "blue", lty = 2, lwd = 2)
+  ## --- Post-hoc Tukey plots --- ##
+  for (i in 1:perm) {
+    plot(t.seq, Tukey.posthoc[, i], type = "l", col = "purple", lwd = 2,
+         main = paste("Tukey HSD p-values for", colnames(Tukey.posthoc)[i]),
+         xlab = "Time", ylab = "p-value", ylim = c(0, 1))
+    abline(h = alpha, col = "blue", lty = 2, lwd = 2)
+  }
+  par(opar)
+  
+  opar2 <- par(mfrow = c(1, 1), ask = TRUE)
   # Plot group means
   col_set <- rainbow(n_groups)
   ylim_range <- range(c(mean.p, overall_mean)) * 1.05
@@ -241,15 +259,7 @@ fANOVA.pointwise <- function(data, groups, t.seq, alpha = 0.05) {
   legend("topright", legend = c("Overall", group_levels),
          col = c("black", col_set), lty = c(1, 2:(n_groups + 1)),
          lwd = c(2, rep(1.5, n_groups)))
-  par(opar)
-  ## --- Post-hoc Tukey plots --- ##
-  opar2 <- par(mfrow = c(1, 1), ask = TRUE)
-  for (i in 1:perm) {
-    plot(t.seq, Tukey.posthoc[, i], type = "l", col = "purple", lwd = 2,
-         main = paste("Tukey HSD p-values for", colnames(Tukey.posthoc)[i]),
-         xlab = "Time", ylab = "p-value", ylim = c(0, 1))
-    abline(h = alpha, col = "blue", lty = 2, lwd = 2)
-  }
+
   par(opar2)
   ## --- Return --- ##
   return(list(
@@ -276,29 +286,80 @@ fanova_results <- fANOVA.pointwise(
 # this gives plots and shows us that at ALL timepoints, the low and high clusters vary
 
 
+# REGRESSION
 
-############
-### Regression - Attempt 2
-###########
-
-# Evaluate functional objects
-cons_matrix <- eval.fd(time_grid, fd_smooth)
-price_vec <- eval.fd(time_grid, price_fd)
-temp_vec  <- eval.fd(time_grid, temp_fd)
-
-# Average consumption across clients (scalar response per timepoint)
-avg_consumption <- rowMeans(cons_matrix)
-
-# Fit a time-level scalar regression
-reg_df <- data.frame(cons = avg_consumption, price = price_vec, temp = temp_vec)
-
-model <- lm(cons ~ price + temp, data = reg_df)
-summary(model)
+# scalar - functional
 
 
-# This does get us a model and I think it still counts as FDA, because we are 
-# using functional objects that are smoothened. We are just aligning it on time and not client-level
-# (because our regressor vary over time and not across clients)
+df <- df %>%
+  rename(price = `price EUR/MWH`,
+         temp = `temperature C`)
 
-# from the result we can see that both price and temp are significant.
-# Our model also explains 75% of variance.
+df$Total <- rowSums(df[, 2:409], na.rm = TRUE) 
+
+n_weeks <- floor(nrow(df) / 168)  
+total_matrix <- matrix(df$Total[1:(n_weeks * 168)], nrow = 168) 
+tt <- seq(0, 1, length.out = 168)
+
+X_fd <- fdata(total_matrix, argvals = tt, rangeval = c(0, 1))
+
+price_weekly <- tapply(df$price[1:(n_weeks * 168)], rep(1:n_weeks, each = 168), mean)
+temp_weekly  <- tapply(df$temp[1:(n_weeks * 168)], rep(1:n_weeks, each = 168), mean)
+
+covariates_df <- data.frame(price = price_weekly, temp = temp_weekly)
+
+basis_fourier <- create.fourier.basis(c(0, 1), nbasis = 9)
+basis.x <- list("X" = basis_fourier)
+basis.b <- list("X" = basis_fourier)
+
+ldata <- list("df" = covariates_df, "X" = X_fd)
+
+res <- fregre.lm(price ~ X + temp, data = ldata,
+                 basis.x = basis.x, basis.b = basis.b)
+summary(res)
+
+plot(res)
+
+
+beta_fd <- fd(res$coefficients[3:11], basis.b[["X"]])
+plot(beta_fd, main = "Functional Covariant", ylab = "Coefficient", xlab = "Time")
+
+
+## Functional - Scalar
+
+Y <- t(total_matrix)
+Y <- as.matrix(Y)
+
+tt <- seq(0, 1, length.out = 168)
+basis <- create.fourier.basis(rangeval = c(0, 1), nbasis = 25)  # adjust nbasis as needed
+
+Y_fd <- Data2fd(argvals = tt, y = t(Y), basisobj = basis)
+
+X <- model.matrix(~ price + temp, data = data.frame(price = price_weekly, temp = temp_weekly))
+
+res <- refund::fosr(fdobj = Y_fd, X = X, method = "OLS")
+par(mfrow = c(1, 1))
+
+plot(res, 1)
+
+tt <- seq(0, 1, length.out = nrow(res$est.func))  # time grid (normalized)
+tt <- seq(0, 1, length.out = nrow(res$est.func))
+
+plot(tt, res$est.func[, 1], type = "l", lwd = 2,
+     main = "Intercept β_0(t)",
+     ylab = "Coefficient", xlab = "Time",
+     ylim = c(min(res$est.func[,1], 0), max(res$est.func[,1], 0)))  # force 0 to be shown
+abline(h = 0, col = "red", lty = 2, lwd = 2)  # red, dashed, thicker
+# Plot price effect
+plot(tt, res$est.func[, 2], type = "l", lwd = 2,
+     main = "Effect of Price B_1(t)",
+     ylab = "Coefficient", xlab = "Time",
+     ylim = c(min(res$est.func[,2], -1.5), max(res$est.func[,2], 0)))  # force 0 to be shown
+abline(h = 0, col = "red", lty = 2, lwd = 2)  # red, dashed, thicker
+# Plot price effect
+plot(tt, res$est.func[, 3], type = "l", lwd = 2,
+     main = "Effect of Temp β_2(t)",
+     ylab = "Coefficient", xlab = "Time",
+     ylim = c(min(res$est.func[,3], 0), max(res$est.func[,3], 1.5)))  # force 0 to be shown
+abline(h = 0, col = "red", lty = 2, lwd = 2)  # red, dashed, thicker
+
